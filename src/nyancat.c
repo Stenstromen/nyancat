@@ -360,53 +360,107 @@ void print_padding(int amount) {
 }
 
 void run_telnet_server(void) {
-    int server_fd;
-    struct sockaddr_in server_addr;
+    int server_fd_v4, server_fd_v6;
+    struct sockaddr_in server_addr_v4;
+    struct sockaddr_in6 server_addr_v6;
+    fd_set read_fds;
+    int max_fd;
     
-    /* Create socket */
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        perror("Could not create socket");
+    /* Create IPv4 socket */
+    server_fd_v4 = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd_v4 < 0) {
+        perror("Could not create IPv4 socket");
         exit(1);
     }
     
-    /* Allow port reuse */
+    /* Create IPv6 socket */
+    server_fd_v6 = socket(AF_INET6, SOCK_STREAM, 0);
+    if (server_fd_v6 < 0) {
+        perror("Could not create IPv6 socket");
+        close(server_fd_v4);
+        exit(1);
+    }
+    
+    /* Allow port reuse for both sockets */
     int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt failed");
+    setsockopt(server_fd_v4, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(server_fd_v6, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    /* Disable IPv6 only mode to allow IPv4 mapped addresses */
+    int no_v6_only = 0;
+    setsockopt(server_fd_v6, IPPROTO_IPV6, IPV6_V6ONLY, &no_v6_only, sizeof(no_v6_only));
+    
+    /* Setup IPv4 address structure */
+    memset(&server_addr_v4, 0, sizeof(server_addr_v4));
+    server_addr_v4.sin_family = AF_INET;
+    server_addr_v4.sin_addr.s_addr = INADDR_ANY;
+    server_addr_v4.sin_port = htons(server_port);
+    
+    /* Setup IPv6 address structure */
+    memset(&server_addr_v6, 0, sizeof(server_addr_v6));
+    server_addr_v6.sin6_family = AF_INET6;
+    server_addr_v6.sin6_addr = in6addr_any;
+    server_addr_v6.sin6_port = htons(server_port);
+    
+    /* Bind both sockets */
+    if (bind(server_fd_v4, (struct sockaddr *)&server_addr_v4, sizeof(server_addr_v4)) < 0) {
+        perror("IPv4 bind failed");
+        close(server_fd_v4);
+        close(server_fd_v6);
         exit(1);
     }
     
-    /* Setup server address structure */
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(server_port);
-    
-    /* Bind */
-    if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Bind failed");
+    if (bind(server_fd_v6, (struct sockaddr *)&server_addr_v6, sizeof(server_addr_v6)) < 0) {
+        perror("IPv6 bind failed");
+        close(server_fd_v4);
+        close(server_fd_v6);
         exit(1);
     }
     
-    /* Listen */
-    if (listen(server_fd, 5) < 0) {
+    /* Listen on both sockets */
+    if (listen(server_fd_v4, 5) < 0 || listen(server_fd_v6, 5) < 0) {
         perror("Listen failed");
+        close(server_fd_v4);
+        close(server_fd_v6);
         exit(1);
     }
     
-    printf("Nyancat telnet server listening on port %d\n", server_port);
+    printf("Nyancat telnet server listening on port %d (IPv4 and IPv6)\n", server_port);
+    
+    max_fd = (server_fd_v4 > server_fd_v6) ? server_fd_v4 : server_fd_v6;
     
     while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
+        FD_ZERO(&read_fds);
+        FD_SET(server_fd_v4, &read_fds);
+        FD_SET(server_fd_v6, &read_fds);
         
-        /* Accept connection */
-        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+        /* Wait for incoming connections on either socket */
+        if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) < 0) {
+            perror("Select failed");
+            continue;
+        }
+        
+        int client_fd = -1;
+        char client_addr_str[INET6_ADDRSTRLEN];
+        
+        if (FD_ISSET(server_fd_v4, &read_fds)) {
+            struct sockaddr_in client_addr;
+            socklen_t client_len = sizeof(client_addr);
+            client_fd = accept(server_fd_v4, (struct sockaddr *)&client_addr, &client_len);
+            inet_ntop(AF_INET, &(client_addr.sin_addr), client_addr_str, INET6_ADDRSTRLEN);
+        } else if (FD_ISSET(server_fd_v6, &read_fds)) {
+            struct sockaddr_in6 client_addr;
+            socklen_t client_len = sizeof(client_addr);
+            client_fd = accept(server_fd_v6, (struct sockaddr *)&client_addr, &client_len);
+            inet_ntop(AF_INET6, &(client_addr.sin6_addr), client_addr_str, INET6_ADDRSTRLEN);
+        }
+        
         if (client_fd < 0) {
             perror("Accept failed");
             continue;
         }
+        
+        printf("New connection from %s\n", client_addr_str);
         
         /* Fork to handle client */
         pid_t pid = fork();
@@ -418,7 +472,8 @@ void run_telnet_server(void) {
         
         if (pid == 0) {
             /* Child process */
-            close(server_fd);
+            close(server_fd_v4);
+            close(server_fd_v6);
             
             /* Redirect stdout to client socket */
             dup2(client_fd, STDOUT_FILENO);
