@@ -64,6 +64,9 @@
 #include <time.h>
 #include <setjmp.h>
 #include <getopt.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <sys/ioctl.h>
 
@@ -102,15 +105,11 @@ const char * colors[256] = {NULL};
  */
 const char * output = "  ";
 
-/*
- * Are we currently in telnet mode?
- */
+/* Global variables */
 int telnet = 0;
-
-/*
- * Whether or not to show the counter
- */
 int show_counter = 1;
+int always_escape = 0;
+int delay_ms = 90;
 
 /*
  * Number of frames to show before quitting
@@ -135,6 +134,14 @@ int set_title = 1;
  */
 jmp_buf environment;
 
+/* Default telnet port */
+int server_port = 23;
+/* Listen mode flag */
+int listen_mode = 0;
+
+/* Add these with the other external declarations */
+extern int skip_intro;
+extern int show_intro;
 
 /*
  * I refuse to include libm to keep this low
@@ -175,7 +182,7 @@ char using_automatic_height = 0;
  * Print escape sequences to return cursor to visible mode
  * and exit the application.
  */
-void finish() {
+void finish(void) {
 	if (clear_screen) {
 		printf("\033[?25h\033[0m\033[H\033[2J");
 	} else {
@@ -271,7 +278,7 @@ unsigned char telnet_will_set[256]= { 0 };
 /*
  * Set the default options for the telnet server.
  */
-void set_options() {
+void set_options(void) {
 	/* We will not echo input */
 	telnet_options[ECHO] = WONT;
 	/* We will set graphics modes */
@@ -347,6 +354,173 @@ void usage(char * argv[]) {
 			argv[0]);
 }
 
+
+void run_telnet_server(void) {
+    int server_fd;
+    struct sockaddr_in server_addr;
+    
+    /* Create socket */
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("Could not create socket");
+        exit(1);
+    }
+    
+    /* Allow port reuse */
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt failed");
+        exit(1);
+    }
+    
+    /* Setup server address structure */
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(server_port);
+    
+    /* Bind */
+    if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind failed");
+        exit(1);
+    }
+    
+    /* Listen */
+    if (listen(server_fd, 5) < 0) {
+        perror("Listen failed");
+        exit(1);
+    }
+    
+    printf("Nyancat telnet server listening on port %d\n", server_port);
+    
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        
+        /* Accept connection */
+        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+        if (client_fd < 0) {
+            perror("Accept failed");
+            continue;
+        }
+        
+        /* Fork to handle client */
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("Fork failed");
+            close(client_fd);
+            continue;
+        }
+        
+        if (pid == 0) {
+            /* Child process */
+            close(server_fd);
+            
+            /* Redirect stdout to client socket */
+            dup2(client_fd, STDOUT_FILENO);
+            dup2(client_fd, STDIN_FILENO);
+            
+            /* Set telnet mode */
+            telnet = 1;
+            
+            /* Run main animation loop */
+            set_options();
+            
+            /* Let the client know what we're using */
+            for (int option = 0; option < 256; option++) {
+                if (telnet_options[option]) {
+                    send_command(telnet_options[option], option);
+                    fflush(stdout);
+                }
+            }
+            for (int option = 0; option < 256; option++) {
+                if (telnet_willack[option]) {
+                    send_command(telnet_willack[option], option);
+                    fflush(stdout);
+                }
+            }
+            
+            /* Store the start time */
+            time_t start, current;
+            time(&start);
+
+            int playing = 1;    /* Animation should continue */
+            size_t i = 0;       /* Current frame # */
+            unsigned int f = 0;  /* Total frames passed */
+            char last = 0;      /* Last color index rendered */
+            int y, x;           /* x/y coordinates of what we're drawing */
+
+            /* Main animation loop from lines 974-1060 */
+            while (playing) {
+                if (clear_screen) {
+                    printf("\033[H");
+                } else {
+                    printf("\033[u");
+                }
+                
+                for (y = min_row; y < max_row; ++y) {
+                    for (x = min_col; x < max_col; ++x) {
+                        char color;
+                        if (y > 23 && y < 43 && x < 0) {
+                            int mod_x = ((-x+2) % 16) / 8;
+                            if ((i / 2) % 2) {
+                                mod_x = 1 - mod_x;
+                            }
+                            const char *rainbow = ",,>>&&&+++###==;;;,,";
+                            color = rainbow[mod_x + y-23];
+                            if (color == 0) color = ',';
+                        } else if (x < 0 || y < 0 || y >= FRAME_HEIGHT || x >= FRAME_WIDTH) {
+                            color = ',';
+                        } else {
+                            color = frames[i][y][x];
+                        }
+                        if (always_escape) {
+                            printf("%s", colors[(int)color]);
+                        } else {
+                            if (color != last && colors[(int)color]) {
+                                last = color;
+                                printf("%s%s", colors[(int)color], output);
+                            } else {
+                                printf("%s", output);
+                            }
+                        }
+                    }
+                    newline(1);
+                }
+
+                if (show_counter) {
+                    time(&current);
+                    double diff = difftime(current, start);
+                    int nLen = digits((int)diff);
+                    int width = (terminal_width - 29 - nLen) / 2;
+                    while (width > 0) {
+                        printf(" ");
+                        width--;
+                    }
+                    printf("\033[1;37mYou have nyaned for %0.0f seconds!\033[J\033[0m", diff);
+                }
+
+                last = 0;
+                ++f;
+                if (frame_count != 0 && f == frame_count) {
+                    break;
+                }
+                ++i;
+                if (!frames[i]) {
+                    i = 0;
+                }
+                usleep(1000 * delay_ms);
+            }
+            
+            close(client_fd);
+            exit(0);
+        } else {
+            /* Parent process */
+            close(client_fd);
+        }
+    }
+}
+
 int main(int argc, char ** argv) {
 
 	char *term = NULL;
@@ -358,8 +532,8 @@ int main(int argc, char ** argv) {
 	unsigned short sb_len   = 0;
 
 	/* Whether or not to show the MOTD intro */
-	char show_intro = 0;
-	char skip_intro = 0;
+	int show_intro = 0;
+	int skip_intro = 0;
 
 	/* Long option names */
 	static struct option long_opts[] = {
@@ -378,15 +552,17 @@ int main(int argc, char ** argv) {
 		{"max-cols",   required_argument, 0, 'C'},
 		{"width",      required_argument, 0, 'W'},
 		{"height",     required_argument, 0, 'H'},
+		{"listen",     no_argument,       0, 'l'},
+		{"port",       required_argument, 0, 'p'},
 		{0,0,0,0}
 	};
 
 	/* Time delay in milliseconds */
-	int delay_ms = 90; // Default to original value
+	delay_ms = 90; // Default to original value
 
 	/* Process arguments */
 	int index, c;
-	while ((c = getopt_long(argc, argv, "eshiItnd:f:r:R:c:C:W:H:", long_opts, &index)) != -1) {
+	while ((c = getopt_long(argc, argv, "eshiItnd:f:r:R:c:C:W:H:lp:", long_opts, &index)) != -1) {
 		if (!c) {
 			if (long_opts[index].flag == 0) {
 				c = long_opts[index].val;
@@ -415,7 +591,7 @@ int main(int argc, char ** argv) {
 			case 'n':
 				show_counter = 0;
 				break;
-			case 'd':
+ 			case 'd':
 				if (10 <= atoi(optarg) && atoi(optarg) <= 1000)
 					delay_ms = atoi(optarg);
 				break;
@@ -441,6 +617,16 @@ int main(int argc, char ** argv) {
 			case 'H':
 				min_row = (FRAME_HEIGHT - atoi(optarg)) / 2;
 				max_row = (FRAME_HEIGHT + atoi(optarg)) / 2;
+				break;
+			case 'l':
+				listen_mode = 1;
+				break;
+			case 'p':
+				server_port = atoi(optarg);
+				if (server_port <= 0 || server_port > 65535) {
+					fprintf(stderr, "Invalid port number\n");
+					return 1;
+				}
 				break;
 			default:
 				break;
@@ -616,8 +802,6 @@ int main(int argc, char ** argv) {
 			ttype = 8;
 		}
 	}
-
-	int always_escape = 0; /* Used for text mode */
 
 	/* Accept ^C -> restore cursor */
 	signal(SIGINT, SIGINT_handler);
@@ -836,105 +1020,80 @@ int main(int argc, char ** argv) {
 		}
 	}
 
-	/* Store the start time */
+	if (listen_mode) {
+		run_telnet_server();
+		return 0;
+	}
+
+	/* Add this section for standalone mode */
 	time_t start, current;
 	time(&start);
 
-	int playing = 1;    /* Animation should continue [left here for modifications] */
+	int playing = 1;    /* Animation should continue */
 	size_t i = 0;       /* Current frame # */
-	unsigned int f = 0; /* Total frames passed */
+	unsigned int f = 0;  /* Total frames passed */
 	char last = 0;      /* Last color index rendered */
-	int y, x;        /* x/y coordinates of what we're drawing */
+
 	while (playing) {
-		/* Reset cursor */
 		if (clear_screen) {
 			printf("\033[H");
 		} else {
 			printf("\033[u");
 		}
-		/* Render the frame */
-		for (y = min_row; y < max_row; ++y) {
-			for (x = min_col; x < max_col; ++x) {
+		
+		for (int y = min_row; y < max_row; ++y) {
+			for (int x = min_col; x < max_col; ++x) {
 				char color;
 				if (y > 23 && y < 43 && x < 0) {
-					/*
-					 * Generate the rainbow tail.
-					 *
-					 * This is done with a pretty simplistic square wave.
-					 */
 					int mod_x = ((-x+2) % 16) / 8;
 					if ((i / 2) % 2) {
 						mod_x = 1 - mod_x;
 					}
-					/*
-					 * Our rainbow, with some padding.
-					 */
 					const char *rainbow = ",,>>&&&+++###==;;;,,";
 					color = rainbow[mod_x + y-23];
 					if (color == 0) color = ',';
 				} else if (x < 0 || y < 0 || y >= FRAME_HEIGHT || x >= FRAME_WIDTH) {
-					/* Fill all other areas with background */
 					color = ',';
 				} else {
-					/* Otherwise, get the color from the animation frame. */
 					color = frames[i][y][x];
 				}
 				if (always_escape) {
-					/* Text mode (or "Always Send Color Escapes") */
 					printf("%s", colors[(int)color]);
 				} else {
 					if (color != last && colors[(int)color]) {
-						/* Normal Mode, send escape (because the color changed) */
 						last = color;
 						printf("%s%s", colors[(int)color], output);
 					} else {
-						/* Same color, just send the output characters */
 						printf("%s", output);
 					}
 				}
 			}
-			/* End of row, send newline */
 			newline(1);
 		}
+
 		if (show_counter) {
-			/* Get the current time for the "You have nyaned..." string */
 			time(&current);
 			double diff = difftime(current, start);
-			/* Now count the length of the time difference so we can center */
 			int nLen = digits((int)diff);
-			/*
-			 * 29 = the length of the rest of the string;
-			 * XXX: Replace this was actually checking the written bytes from a
-			 * call to sprintf or something
-			 */
 			int width = (terminal_width - 29 - nLen) / 2;
-			/* Spit out some spaces so that we're actually centered */
 			while (width > 0) {
 				printf(" ");
 				width--;
 			}
-			/* You have nyaned for [n] seconds!
-			 * The \033[J ensures that the rest of the line has the dark blue
-			 * background, and the \033[1;37m ensures that our text is bright white.
-			 * The \033[0m prevents the Apple ][ from flipping everything, but
-			 * makes the whole nyancat less bright on the vt220
-			 */
 			printf("\033[1;37mYou have nyaned for %0.0f seconds!\033[J\033[0m", diff);
 		}
-		/* Reset the last color so that the escape sequences rewrite */
+
 		last = 0;
-		/* Update frame count */
 		++f;
 		if (frame_count != 0 && f == frame_count) {
-			finish();
+			break;
 		}
 		++i;
 		if (!frames[i]) {
-			/* Loop animation */
 			i = 0;
 		}
-		/* Wait */
 		usleep(1000 * delay_ms);
 	}
+
 	return 0;
 }

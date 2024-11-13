@@ -1,4 +1,6 @@
-# Nyancat CLI
+# Nyancat CLI with built-in telnet server
+
+**Shamelessly stolen from https://github.com/klange/nyancat**
 
 Nyancat rendered in your terminal.
 
