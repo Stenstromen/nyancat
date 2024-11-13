@@ -385,12 +385,38 @@ void run_telnet_server(void) {
     
     /* Allow port reuse for both sockets */
     int opt = 1;
-    setsockopt(server_fd_v4, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    setsockopt(server_fd_v6, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (setsockopt(server_fd_v4, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("IPv4 setsockopt failed");
+        close(server_fd_v4);
+        close(server_fd_v6);
+        exit(1);
+    }
     
-    /* Disable IPv6 only mode to allow IPv4 mapped addresses */
-    int no_v6_only = 0;
-    setsockopt(server_fd_v6, IPPROTO_IPV6, IPV6_V6ONLY, &no_v6_only, sizeof(no_v6_only));
+    if (setsockopt(server_fd_v6, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("IPv6 setsockopt failed");
+        close(server_fd_v4);
+        close(server_fd_v6);
+        exit(1);
+    }
+
+    /* Also set SO_REUSEPORT if available */
+    #ifdef SO_REUSEPORT
+    if (setsockopt(server_fd_v4, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
+        perror("IPv4 SO_REUSEPORT failed");
+    }
+    if (setsockopt(server_fd_v6, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
+        perror("IPv6 SO_REUSEPORT failed");
+    }
+    #endif
+
+    /* Enable dual-stack socket */
+    int no = 0;
+    if (setsockopt(server_fd_v6, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)) < 0) {
+        perror("Setting IPV6_V6ONLY failed");
+        close(server_fd_v4);
+        close(server_fd_v6);
+        exit(1);
+    }
     
     /* Setup IPv4 address structure */
     memset(&server_addr_v4, 0, sizeof(server_addr_v4));
