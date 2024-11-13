@@ -166,15 +166,11 @@ int max_row = -1;
 int min_col = -1;
 int max_col = -1;
 
-/*
- * Actual width/height of terminal.
- */
-int terminal_width = 80;
-int terminal_height = 24;
+/* Fixed terminal dimensions */
+#define TERMINAL_WIDTH 140
+#define TERMINAL_HEIGHT 40
 
-/*
- * Flags to keep track of whether width/height were automatically set.
- */
+/* Flags to keep track of whether width/height were automatically set. */
 char using_automatic_width = 0;
 char using_automatic_height = 0;
 
@@ -222,7 +218,7 @@ void SIGPIPE_handler(int sig) {
 
 void SIGWINCH_handler(int sig) {
 	(void)sig;
-	struct winsize w;
+/* 	struct winsize w;
 	ioctl(0, TIOCGWINSZ, &w);
 	terminal_width = w.ws_col;
 	terminal_height = w.ws_row;
@@ -237,7 +233,7 @@ void SIGWINCH_handler(int sig) {
 		max_row = (FRAME_HEIGHT + (terminal_height-1)) / 2;
 	}
 
-	signal(SIGWINCH, SIGWINCH_handler);
+	signal(SIGWINCH, SIGWINCH_handler); */
 }
 
 /*
@@ -354,6 +350,14 @@ void usage(char * argv[]) {
 			argv[0]);
 }
 
+/*
+ * Print padding spaces for centering the animation
+ */
+void print_padding(int amount) {
+    for (int i = 0; i < amount; i++) {
+        printf(" ");
+    }
+}
 
 void run_telnet_server(void) {
     int server_fd;
@@ -492,7 +496,7 @@ void run_telnet_server(void) {
                     time(&current);
                     double diff = difftime(current, start);
                     int nLen = digits((int)diff);
-                    int width = (terminal_width - 29 - nLen) / 2;
+                    int width = (TERMINAL_WIDTH - 29 - nLen) / 2;
                     while (width > 0) {
                         printf(" ");
                         width--;
@@ -523,7 +527,7 @@ void run_telnet_server(void) {
 
 int main(int argc, char ** argv) {
 
-	char *term = NULL;
+	char * term = NULL;
 	unsigned int k;
 	int ttype;
 	uint32_t option = 0, done = 0, sb_mode = 0;
@@ -687,8 +691,6 @@ int main(int argc, char ** argv) {
 								/* This was a response to the NAWS command, meaning
 								 * that this should be a window size */
 								alarm(2);
-								terminal_width = (sb[1] << 8) | sb[2];
-								terminal_height = (sb[3] << 8) | sb[4];
 								done++;
 							}
 							break;
@@ -755,15 +757,8 @@ int main(int argc, char ** argv) {
 		}
 		alarm(0);
 	} else {
-		/* We are running standalone, retrieve the
-		 * terminal type from the environment. */
-		term = getenv("TERM");
-
-		/* Also get the number of columns */
-		struct winsize w;
-		ioctl(0, TIOCGWINSZ, &w);
-		terminal_width = w.ws_col;
-		terminal_height = w.ws_row;
+		/* We are running standalone with fixed dimensions */
+		term = strdup("xterm-256color"); // Make a modifiable copy
 	}
 
 	/* Default ttype */
@@ -794,7 +789,7 @@ int main(int argc, char ** argv) {
 			ttype = 1; /* xterm 256-color compatible */
 		} else if (strstr(term, "rxvt")) {
 			ttype = 3; /* Accepts LINUX mode */
-		} else if (strstr(term, "vt100") && terminal_width == 40) {
+		} else if (strstr(term, "vt100") && TERMINAL_WIDTH == 40) {
 			ttype = 7; /* No color support, only 40 columns */
 		} else if (!strncmp(term, "st", 2)) {
 			ttype = 1; /* suckless simple terminal is xterm-256color-compatible */
@@ -930,7 +925,8 @@ int main(int argc, char ** argv) {
 			colors['*']  = ";";             /* Gray cat face */
 			colors['%']  = "o";             /* Pink cheeks */
 			always_escape = 1;
-			terminal_width = 40;
+			#undef TERMINAL_WIDTH
+			#define TERMINAL_WIDTH 40  /* Override width for 40-column mode */
 			break;
 		case 8:
 			colors[',']  = "\033[48;2;0;49;105m";    /* Blue background */
@@ -953,14 +949,14 @@ int main(int argc, char ** argv) {
 	}
 
 	if (min_col == max_col) {
-		min_col = (FRAME_WIDTH - terminal_width/2) / 2;
-		max_col = (FRAME_WIDTH + terminal_width/2) / 2;
+		min_col = 0;
+		max_col = FRAME_WIDTH;
 		using_automatic_width = 1;
 	}
 
 	if (min_row == max_row) {
-		min_row = (FRAME_HEIGHT - (terminal_height-1)) / 2;
-		max_row = (FRAME_HEIGHT + (terminal_height-1)) / 2;
+		min_row = FRAME_HEIGHT/4;  // Start from 1/4 down the frame
+		max_row = min_row + 32;    // Show 32 rows of the frame
 		using_automatic_height = 1;
 	}
 
@@ -1041,7 +1037,15 @@ int main(int argc, char ** argv) {
 			printf("\033[u");
 		}
 		
+		newline(1);  // Single line top margin
+		
+		for (int i = 0; i < (TERMINAL_HEIGHT - 32) / 2 - 1; i++) {  // Center the 32-row frame
+			newline(1);
+		}
+		
 		for (int y = min_row; y < max_row; ++y) {
+			print_padding((TERMINAL_WIDTH - (max_col - min_col) * 2) / 2);
+			
 			for (int x = min_col; x < max_col; ++x) {
 				char color;
 				if (y > 23 && y < 43 && x < 0) {
@@ -1071,11 +1075,14 @@ int main(int argc, char ** argv) {
 			newline(1);
 		}
 
+		newline(1);  // Reduced space before counter from 2 to 1
+		
 		if (show_counter) {
 			time(&current);
 			double diff = difftime(current, start);
 			int nLen = digits((int)diff);
-			int width = (terminal_width - 29 - nLen) / 2;
+			int width = (TERMINAL_WIDTH - 29 - nLen) / 2;
+			newline(1);
 			while (width > 0) {
 				printf(" ");
 				width--;
@@ -1083,7 +1090,9 @@ int main(int argc, char ** argv) {
 			printf("\033[1;37mYou have nyaned for %0.0f seconds!\033[J\033[0m", diff);
 		}
 
+		
 		last = 0;
+		
 		++f;
 		if (frame_count != 0 && f == frame_count) {
 			break;
@@ -1093,6 +1102,10 @@ int main(int argc, char ** argv) {
 			i = 0;
 		}
 		usleep(1000 * delay_ms);
+	}
+
+	if (term) {
+		free(term);
 	}
 
 	return 0;
