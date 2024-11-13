@@ -70,6 +70,8 @@
 
 #include <sys/ioctl.h>
 
+#include <sys/select.h>
+
 #ifndef TIOCGWINSZ
 #include <termios.h>
 #endif
