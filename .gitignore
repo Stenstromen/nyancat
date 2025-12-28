@@ -1,3 +1,6 @@
 nyancat
 *.o
 *.pyc
+strace/*.log
+strace/strace.log
+strace/*.tar

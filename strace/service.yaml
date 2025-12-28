@@ -1,0 +1,17 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nyanserv-service
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+    - name: telnet
+      port: 23023
+      targetPort: 2323
+  selector:
+    app: nyanserv
+  type: ClusterIP
